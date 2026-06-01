@@ -44,7 +44,6 @@ console.log("------------------------------------");
 console.log("Exotel binary message received");
 }
 
-```javascript
 // TEMPORARILY DISABLED
 // elevenWs.send(data);
 
