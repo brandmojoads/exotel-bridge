@@ -101,7 +101,7 @@ wss.on("connection", (exotelWs) => {
       type: "conversation_initiation_client_data",
       conversation_config_override: {
         agent: { language: "en" },
-        tts:   { optimize_streaming_latency: 0 }
+        tts:   { optimize_streaming_latency: 3 }
       },
       audio: {
         input:  { encoding: "mulaw", sample_rate: 8000 },
