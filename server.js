@@ -7,12 +7,12 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
 
 const server = http.createServer((req, res) => {
   res.writeHead(200);
-  res.end("ElevenLabs-Exotel Bridge v8 Running");
+  res.end("ElevenLabs-Exotel Bridge v9 Running");
 });
 
 const wss = new WebSocket.Server({ server });
 
-wss.on("connection", (exotelWs, req) => {
+wss.on("connection", (exotelWs) => {
   console.log("=================================");
   console.log("Exotel connected at " + new Date().toISOString());
   console.log("=================================");
@@ -28,6 +28,7 @@ wss.on("connection", (exotelWs, req) => {
 
   function startPacer() {
     if (pacerTimer) return;
+    console.log("Pacer STARTED");
     pacerTimer = setInterval(() => {
       if (outBuffer.length === 0) { stopPacer(); return; }
       const chunk = outBuffer.slice(0, CHUNK_BYTES);
@@ -42,7 +43,11 @@ wss.on("connection", (exotelWs, req) => {
   }
 
   function stopPacer() {
-    if (pacerTimer) { clearInterval(pacerTimer); pacerTimer = null; }
+    if (pacerTimer) {
+      clearInterval(pacerTimer);
+      pacerTimer = null;
+      console.log("Pacer STOPPED");
+    }
   }
 
   function clearOutBuffer() {
@@ -71,13 +76,22 @@ wss.on("connection", (exotelWs, req) => {
         output: { encoding: "mulaw", sample_rate: 8000 }
       }
     }));
-    console.log("Sent init — mulaw 8kHz both directions");
   });
 
-  elevenWs.on("message", (data) => {
+  elevenWs.on("message", (data, isBinary) => {
+    // Log EVERY message type for debugging
+    if (isBinary) {
+      console.log("ElevenLabs BINARY frame:", data.length, "bytes");
+      outBuffer = Buffer.concat([outBuffer, data]);
+      startPacer();
+      return;
+    }
+
     try {
-      const msg = JSON.parse(data.toString());
+      const raw = data.toString();
+      const msg = JSON.parse(raw);
       const t   = msg.type;
+      console.log("[ElevenLabs type]:", t);
 
       if (t === "conversation_initiation_metadata") {
         console.log("ElevenLabs READY:", JSON.stringify(msg));
@@ -86,11 +100,25 @@ wss.on("connection", (exotelWs, req) => {
         audioQueue = [];
       }
 
-      if (t === "audio" && msg.audio_event && msg.audio_event.audio_base_64) {
-        const raw = Buffer.from(msg.audio_event.audio_base_64, "base64");
-        outBuffer = Buffer.concat([outBuffer, raw]);
-        console.log("Audio chunk:", raw.length, "bytes | buffer:", outBuffer.length);
-        startPacer();
+      if (t === "audio") {
+        // Try all possible audio payload locations
+        let audioB64 = null;
+        if (msg.audio_event && msg.audio_event.audio_base_64) {
+          audioB64 = msg.audio_event.audio_base_64;
+          console.log("Audio via audio_event.audio_base_64");
+        } else if (msg.audio) {
+          audioB64 = msg.audio;
+          console.log("Audio via msg.audio");
+        } else {
+          console.log("Audio message but NO payload found:", JSON.stringify(msg).slice(0, 200));
+        }
+
+        if (audioB64) {
+          const raw = Buffer.from(audioB64, "base64");
+          console.log("Audio decoded:", raw.length, "bytes → buffer now:", outBuffer.length + raw.length);
+          outBuffer = Buffer.concat([outBuffer, raw]);
+          startPacer();
+        }
       }
 
       if (t === "interruption") {
@@ -104,8 +132,7 @@ wss.on("connection", (exotelWs, req) => {
       }
 
     } catch (e) {
-      outBuffer = Buffer.concat([outBuffer, data]);
-      startPacer();
+      console.log("[ElevenLabs] JSON parse error:", e.message, "| raw:", data.toString().slice(0, 100));
     }
   });
 
@@ -124,11 +151,10 @@ wss.on("connection", (exotelWs, req) => {
   exotelWs.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
-      console.log("[Exotel event]:", msg.event);
 
       if (msg.event === "start" && msg.start && msg.start.streamSid) {
         streamSid = msg.start.streamSid;
-        console.log("Stream SID:", streamSid);
+        console.log("[Exotel] Stream SID:", streamSid);
       }
 
       if (msg.event === "media" && msg.media && msg.media.payload) {
@@ -142,7 +168,7 @@ wss.on("connection", (exotelWs, req) => {
       }
 
       if (msg.event === "stop") {
-        console.log("Exotel stream stopped");
+        console.log("[Exotel] Stream stopped");
         stopPacer();
         if (elevenWs.readyState === WebSocket.OPEN) elevenWs.close();
       }
@@ -162,6 +188,6 @@ wss.on("connection", (exotelWs, req) => {
 });
 
 server.listen(PORT, () => {
-  console.log("Bridge v8 running on port " + PORT);
+  console.log("Bridge v9 running on port " + PORT);
   console.log("Agent ID: " + AGENT_ID);
 });
