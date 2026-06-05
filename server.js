@@ -7,7 +7,7 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
 
 const server = http.createServer((req, res) => {
   res.writeHead(200);
-  res.end("ElevenLabs-Exotel Bridge v6 Running");
+  res.end("ElevenLabs-Exotel Bridge v7 Running");
 });
 
 const wss = new WebSocket.Server({ server });
@@ -22,77 +22,103 @@ wss.on("connection", (exotelWs) => {
   let elevenReady = false;
   let audioQueue  = [];
 
+  // Outbound audio pacer — 160 bytes every 20ms = mulaw 8kHz real-time
+  const CHUNK_BYTES = 160;
+  const CHUNK_MS    = 20;
+  let outBuffer  = Buffer.alloc(0);
+  let pacerTimer = null;
+
+  function startPacer() {
+    if (pacerTimer) return;
+    pacerTimer = setInterval(() => {
+      if (outBuffer.length === 0) { stopPacer(); return; }
+      const chunk = outBuffer.slice(0, CHUNK_BYTES);
+      outBuffer   = outBuffer.slice(CHUNK_BYTES);
+      if (exotelWs.readyState === WebSocket.OPEN) {
+        exotelWs.send(JSON.stringify({
+          event: "media", streamSid,
+          media: { payload: chunk.toString("base64") }
+        }));
+      }
+    }, CHUNK_MS);
+  }
+
+  function stopPacer() {
+    if (pacerTimer) { clearInterval(pacerTimer); pacerTimer = null; }
+  }
+
+  function clearOutBuffer() {
+    outBuffer = Buffer.alloc(0);
+    stopPacer();
+    if (exotelWs.readyState === WebSocket.OPEN) {
+      exotelWs.send(JSON.stringify({ event: "clear", streamSid }));
+    }
+  }
+
   function connectToElevenLabs() {
-    const url = "wss://api.elevenlabs.io/v1/convai/conversation?agent_id=" + AGENT_ID;
+    const url     = "wss://api.elevenlabs.io/v1/convai/conversation?agent_id=" + AGENT_ID;
     const headers = ELEVENLABS_API_KEY ? { "xi-api-key": ELEVENLABS_API_KEY } : {};
-    elevenWs = new WebSocket(url, { headers });
+    elevenWs      = new WebSocket(url, { headers });
 
     elevenWs.on("open", () => {
       console.log("ElevenLabs WebSocket open");
-      const initMsg = {
+      elevenWs.send(JSON.stringify({
         type: "conversation_initiation_client_data",
         conversation_config_override: {
           agent: { language: "en" },
-          tts: { optimize_streaming_latency: 3 }
+          tts:   { optimize_streaming_latency: 3 }
         },
         audio: {
           input:  { encoding: "mulaw", sample_rate: 8000 },
           output: { encoding: "mulaw", sample_rate: 8000 }
         }
-      };
-      elevenWs.send(JSON.stringify(initMsg));
+      }));
       console.log("Sent init — mulaw 8kHz both directions");
     });
 
     elevenWs.on("message", (data) => {
       try {
         const msg = JSON.parse(data.toString());
-        const t = msg.type;
+        const t   = msg.type;
 
         if (t === "conversation_initiation_metadata") {
           console.log("ElevenLabs READY:", JSON.stringify(msg));
           elevenReady = true;
-          console.log("Flushing", audioQueue.length, "queued chunks");
-          audioQueue.forEach((chunk) => elevenWs.send(chunk));
+          audioQueue.forEach((c) => elevenWs.send(c));
           audioQueue = [];
         }
 
         if (t === "audio" && msg.audio_event && msg.audio_event.audio_base_64) {
-          if (exotelWs.readyState === WebSocket.OPEN) {
-            exotelWs.send(JSON.stringify({
-              event:     "media",
-              streamSid: streamSid,
-              media:     { payload: msg.audio_event.audio_base_64 }
-            }));
-          }
+          const raw = Buffer.from(msg.audio_event.audio_base_64, "base64");
+          outBuffer = Buffer.concat([outBuffer, raw]);
+          startPacer();
         }
 
         if (t === "interruption") {
-          if (exotelWs.readyState === WebSocket.OPEN) {
-            exotelWs.send(JSON.stringify({ event: "clear", streamSid }));
-          }
+          console.log("Interruption — clearing buffer");
+          clearOutBuffer();
         }
 
         if (t === "ping" && msg.ping_event && msg.ping_event.event_id !== undefined) {
+          elevenWs.send(JSON.stringify({ type: "pong", event_id: msg.ping_event.event_id }));
           console.log("Pong sent, event_id:", msg.ping_event.event_id);
-          elevenWs.send(JSON.stringify({
-            type:     "pong",
-            event_id: msg.ping_event.event_id
-          }));
         }
 
       } catch (e) {
-        if (exotelWs.readyState === WebSocket.OPEN) exotelWs.send(data);
+        outBuffer = Buffer.concat([outBuffer, data]);
+        startPacer();
       }
     });
 
     elevenWs.on("close", (code, reason) => {
       console.log("ElevenLabs disconnected:", code, reason.toString());
+      stopPacer();
       if (exotelWs.readyState === WebSocket.OPEN) exotelWs.close();
     });
 
     elevenWs.on("error", (err) => {
       console.error("[ElevenLabs ERROR]:", err.message);
+      stopPacer();
       if (exotelWs.readyState === WebSocket.OPEN) exotelWs.close();
     });
   }
@@ -119,6 +145,7 @@ wss.on("connection", (exotelWs) => {
 
       if (msg.event === "stop") {
         console.log("Exotel stream stopped");
+        stopPacer();
         if (elevenWs && elevenWs.readyState === WebSocket.OPEN) elevenWs.close();
       }
 
@@ -129,6 +156,7 @@ wss.on("connection", (exotelWs) => {
 
   exotelWs.on("close", (code) => {
     console.log("Exotel disconnected, code:", code);
+    stopPacer();
     if (elevenWs && elevenWs.readyState === WebSocket.OPEN) elevenWs.close();
   });
 
@@ -136,6 +164,6 @@ wss.on("connection", (exotelWs) => {
 });
 
 server.listen(PORT, () => {
-  console.log("Bridge v6 running on port " + PORT);
+  console.log("Bridge v7 running on port " + PORT);
   console.log("Agent ID: " + AGENT_ID);
 });
