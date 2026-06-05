@@ -101,7 +101,7 @@ wss.on("connection", (exotelWs) => {
       type: "conversation_initiation_client_data",
       conversation_config_override: {
         agent: { language: "en" },
-        tts:   { optimize_streaming_latency: 3 }
+        tts:   { optimize_streaming_latency: 0 }
       },
       audio: {
         input:  { encoding: "mulaw", sample_rate: 8000 },
@@ -130,8 +130,22 @@ wss.on("connection", (exotelWs) => {
       }
 
       if (t === "audio" && msg.audio_event && msg.audio_event.audio_base_64) {
-        handleElevenAudio(msg.audio_event.audio_base_64, outputFormat);
-      }
+        const size = Buffer.from(
+    msg.audio_event.audio_base_64,
+    "base64"
+  ).length;
+
+  console.log(
+    "AUDIO FRAME:",
+    outputFormat,
+    "SIZE:",
+    size
+  );
+        handleElevenAudio(
+    msg.audio_event.audio_base_64,
+    outputFormat
+  );
+}
 
       if (t === "interruption") { clearOutBuffer(); }
 
