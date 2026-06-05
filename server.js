@@ -21,8 +21,8 @@ wss.on("connection", (exotelWs) => {
   let elevenReady = false;
   let audioQueue  = [];
 
-  const CHUNK_BYTES = 320;
-  const CHUNK_MS    = 40;
+  const CHUNK_BYTES = 160;
+  const CHUNK_MS    = 20;
   let outBuffer  = Buffer.alloc(0);
   let pacerTimer = null;
 
@@ -69,7 +69,7 @@ wss.on("connection", (exotelWs) => {
       type: "conversation_initiation_client_data",
       conversation_config_override: {
         agent: { language: "en" },
-        tts:   { optimize_streaming_latency: 3 }
+        tts:   { optimize_streaming_latency: 0 }
       },
       audio: {
         input:  { encoding: "mulaw", sample_rate: 8000 },
