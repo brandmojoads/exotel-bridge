@@ -21,8 +21,8 @@ wss.on("connection", (exotelWs) => {
   let elevenReady = false;
   let audioQueue  = [];
 
-  const CHUNK_BYTES = 160;
-  const CHUNK_MS    = 20;
+  const CHUNK_BYTES = 320;
+  const CHUNK_MS    = 40;
   let outBuffer  = Buffer.alloc(0);
   let pacerTimer = null;
 
