@@ -112,10 +112,9 @@ wss.on("connection", (exotelWs) => {
 
   elevenWs.on("message", (data, isBinary) => {
     if (isBinary) {
-      outBuffer = Buffer.concat([outBuffer, data]);
-      startPacer();
-      return;
-    }
+  console.log("Ignoring binary frame:", data.length);
+  return;
+}    
     try {
       const msg = JSON.parse(data.toString());
       const t   = msg.type;
