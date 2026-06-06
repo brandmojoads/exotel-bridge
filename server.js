@@ -182,6 +182,14 @@ wss.on("connection", (exotelWs, req, agentId) => {
   exotelWs.on("error", (err) => console.error("[Exotel ERROR]:", err.message));
 });
 
+// Keep-alive ping to prevent Render free tier sleep
+if (process.env.RENDER_KEEP_ALIVE) {
+  const https = require("https");
+  setInterval(() => {
+    https.get("https://exotel-bridge-1.onrender.com").on("error", () => {});
+  }, 14 * 60 * 1000); // ping every 14 minutes
+}
+
 server.listen(PORT, () => {
   console.log("Bridge v11 running on port " + PORT);
   console.log("Agent ID:", AGENT_ID);
