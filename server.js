@@ -1,49 +1,45 @@
 const WebSocket = require("ws");
 const http = require("http");
+const url = require("url");
 
 const PORT = process.env.PORT || 8080;
 const AGENT_ID = process.env.AGENT_ID || "";
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
-
-function sampleToMulaw(s) {
-  const BIAS = 0x84, CLIP = 32635;
-  const sign = s < 0 ? 0x80 : 0;
-  if (sign) s = -s;
-  if (s > CLIP) s = CLIP;
-  s += BIAS;
-  let exp = 7;
-  for (let e = 0, m = 0x4000; e < 8; e++, m >>= 1) {
-    if (s & m) { exp = 7 - e; break; }
-  }
-  const mant = (s >> (exp + 3)) & 0x0f;
-  return (~(sign | (exp << 4) | mant)) & 0xff;
-}
-
-function pcm16kToMulaw8k(b64) {
-  const buf = Buffer.from(b64, "base64");
-  const samples = new Int16Array(buf.buffer, buf.byteOffset, buf.length / 2);
-  const out = Buffer.alloc(Math.floor(samples.length / 2));
-  for (let i = 0; i < out.length; i++) {
-    const avg = Math.round((samples[i * 2] + samples[i * 2 + 1]) / 2);
-    out[i] = sampleToMulaw(avg);
-  }
-  return out.toString("base64");
-}
+const ELEVENLABS_WS_URL = "wss://api.elevenlabs.io/v1/convai/conversation";
 
 const server = http.createServer((req, res) => {
   res.writeHead(200);
-  res.end("ElevenLabs-Exotel Bridge v10 Running");
+  res.end("ElevenLabs-Exotel Bridge v11 Running");
 });
 
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ noServer: true });
 
-wss.on("connection", (exotelWs) => {
+server.on("upgrade", (req, socket, head) => {
+  const parsed   = url.parse(req.url, true);
+  const pathname = parsed.pathname;
+
+  if (
+    pathname === "/v1/convai/conversation/exotel" ||
+    pathname === "/" ||
+    pathname === ""
+  ) {
+    const agentId = parsed.query.agent_id || AGENT_ID;
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit("connection", ws, req, agentId);
+    });
+  } else {
+    console.log("Rejected unknown path:", pathname);
+    socket.destroy();
+  }
+});
+
+wss.on("connection", (exotelWs, req, agentId) => {
   console.log("=== Exotel connected " + new Date().toISOString() + " ===");
+  console.log("Agent ID:", agentId);
 
-  let streamSid    = "default-stream";
-  let elevenReady  = false;
-  let inputQueue   = [];
-  let outputFormat = "ulaw_8000";
+  let streamSid   = "default-stream";
+  let elevenReady = false;
+  let inputQueue  = [];
 
   const CHUNK_BYTES = 160;
   const CHUNK_MS    = 20;
@@ -59,15 +55,16 @@ wss.on("connection", (exotelWs) => {
       outBuffer   = outBuffer.slice(CHUNK_BYTES);
       if (exotelWs.readyState === WebSocket.OPEN) {
         exotelWs.send(JSON.stringify({
-          event: "media", streamSid,
-          media: { payload: chunk.toString("base64") }
+          event:     "media",
+          streamSid: streamSid,
+          media:     { payload: chunk.toString("base64") }
         }));
       }
     }, CHUNK_MS);
   }
 
   function stopPacer() {
-    if (pacerTimer) { clearInterval(pacerTimer); pacerTimer = null; console.log("Pacer STOPPED"); }
+    if (pacerTimer) { clearInterval(pacerTimer); pacerTimer = null; }
   }
 
   function clearOutBuffer() {
@@ -77,31 +74,18 @@ wss.on("connection", (exotelWs) => {
       exotelWs.send(JSON.stringify({ event: "clear", streamSid }));
   }
 
-  function handleElevenAudio(b64, format) {
-    let mulawBuf;
-    if (format === "ulaw_8000" || format === "mulaw_8000") {
-      mulawBuf = Buffer.from(b64, "base64");
-      console.log("Audio: mulaw8k passthrough", mulawBuf.length, "bytes");
-    } else {
-      mulawBuf = Buffer.from(pcm16kToMulaw8k(b64), "base64");
-      console.log("Audio: pcm16k→mulaw8k converted", mulawBuf.length, "bytes");
-    }
-    outBuffer = Buffer.concat([outBuffer, mulawBuf]);
-    startPacer();
-  }
-
-  const elevenWs = new WebSocket(
-    "wss://api.elevenlabs.io/v1/convai/conversation?agent_id=" + AGENT_ID,
-    { headers: ELEVENLABS_API_KEY ? { "xi-api-key": ELEVENLABS_API_KEY } : {} }
-  );
+  const elevenUrl = ELEVENLABS_WS_URL + "?agent_id=" + agentId;
+  const elevenWs  = new WebSocket(elevenUrl, {
+    headers: ELEVENLABS_API_KEY ? { "xi-api-key": ELEVENLABS_API_KEY } : {}
+  });
 
   elevenWs.on("open", () => {
-    console.log("ElevenLabs open — sending init");
+    console.log("ElevenLabs connected — sending init");
     elevenWs.send(JSON.stringify({
       type: "conversation_initiation_client_data",
       conversation_config_override: {
         agent: { language: "en" },
-        tts:   { optimize_streaming_latency: 0 }
+        tts:   { optimize_streaming_latency: 3 }
       },
       audio: {
         input:  { encoding: "mulaw", sample_rate: 8000 },
@@ -112,45 +96,36 @@ wss.on("connection", (exotelWs) => {
 
   elevenWs.on("message", (data, isBinary) => {
     if (isBinary) {
-  console.log("Ignoring binary frame:", data.length);
-  return;
-}    
+      outBuffer = Buffer.concat([outBuffer, data]);
+      startPacer();
+      return;
+    }
     try {
       const msg = JSON.parse(data.toString());
-      const t   = msg.type;
-      console.log("[ElevenLabs]:", t);
 
-      if (t === "conversation_initiation_metadata") {
+      if (msg.type === "conversation_initiation_metadata") {
         const meta = msg.conversation_initiation_metadata_event || {};
-        outputFormat = meta.agent_output_audio_format || "ulaw_8000";
-        console.log("*** Output format confirmed by ElevenLabs:", outputFormat, "***");
+        console.log("ElevenLabs READY | output_format:", meta.agent_output_audio_format);
         elevenReady = true;
         inputQueue.forEach((c) => elevenWs.send(c));
         inputQueue = [];
       }
 
-      if (t === "audio" && msg.audio_event && msg.audio_event.audio_base_64) {
-        const size = Buffer.from(
-    msg.audio_event.audio_base_64,
-    "base64"
-  ).length;
+      if (msg.type === "audio" && msg.audio_event?.audio_base_64) {
+        const raw = Buffer.from(msg.audio_event.audio_base_64, "base64");
+        outBuffer = Buffer.concat([outBuffer, raw]);
+        startPacer();
+      }
 
-  console.log(
-    "AUDIO FRAME:",
-    outputFormat,
-    "SIZE:",
-    size
-  );
-        handleElevenAudio(
-    msg.audio_event.audio_base_64,
-    outputFormat
-  );
-}
+      if (msg.type === "interruption") {
+        clearOutBuffer();
+      }
 
-      if (t === "interruption") { clearOutBuffer(); }
-
-      if (t === "ping" && msg.ping_event?.event_id !== undefined) {
-        elevenWs.send(JSON.stringify({ type: "pong", event_id: msg.ping_event.event_id }));
+      if (msg.type === "ping" && msg.ping_event?.event_id !== undefined) {
+        elevenWs.send(JSON.stringify({
+          type:     "pong",
+          event_id: msg.ping_event.event_id
+        }));
       }
 
     } catch (e) {
@@ -173,10 +148,12 @@ wss.on("connection", (exotelWs) => {
   exotelWs.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
+
       if (msg.event === "start" && msg.start?.streamSid) {
         streamSid = msg.start.streamSid;
-        console.log("[Exotel] streamSid:", streamSid);
+        console.log("streamSid:", streamSid);
       }
+
       if (msg.event === "media" && msg.media?.payload) {
         const chunk = JSON.stringify({ user_audio_chunk: msg.media.payload });
         if (elevenReady && elevenWs.readyState === WebSocket.OPEN) {
@@ -186,10 +163,13 @@ wss.on("connection", (exotelWs) => {
           if (inputQueue.length > 100) inputQueue.shift();
         }
       }
+
       if (msg.event === "stop") {
+        console.log("Exotel stop");
         stopPacer();
         if (elevenWs.readyState === WebSocket.OPEN) elevenWs.close();
       }
+
     } catch (e) {}
   });
 
@@ -203,6 +183,6 @@ wss.on("connection", (exotelWs) => {
 });
 
 server.listen(PORT, () => {
-  console.log("Bridge v10 running on port " + PORT);
-  console.log("Agent ID: " + AGENT_ID);
+  console.log("Bridge v11 running on port " + PORT);
+  console.log("Agent ID:", AGENT_ID);
 });
